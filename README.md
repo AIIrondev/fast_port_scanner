@@ -1,63 +1,151 @@
 
-# Fast Port Scanner Script Documentation
+# **NetworkScanner Documentation**
 
-## Overview
-This script is a multi-threaded port scanner designed to quickly identify open ports on a target host within a specified range. It leverages Python's socket module for network connections, threading for concurrent scanning, and argparse for command-line argument parsing. Additionally, it includes a function for basic OS detection on the target using an SSH command.
+## **Overview**
+The `NetworkScanner` script is a Python-based command-line tool for scanning networks and identifying open ports on hosts. It supports scanning based on specific network interfaces, custom IP ranges, and configurable port ranges. The results are saved to a JSON file for analysis.
 
-## Dependencies
-- **argparse**: Parses command-line arguments.
-- **socket**: Establishes TCP connections to check port status.
-- **colorama**: Provides colored output for different states (open/closed ports).
-- **threading** and **queue**: Manages multi-threaded execution and work queues.
-- **subprocess**: Executes shell commands to obtain system information from the target.
-- **sys**: Handles system-level operations, such as terminating the script.
+---
 
-## Global Constants
-- **N_THREADS**: Number of threads for concurrent scanning (set to 200 by default).
-- **maximal_ports**: Upper limit for the number of ports (default 1025).
-- **Colors (GREEN, GRAY, RESET)**: Used to color-code output for better readability.
+## **Installation and Requirements**
+### **Prerequisites**
+Ensure the following are installed:
+- **Python**: Version 3.8 or later.
+- **Required Libraries**: Install the dependencies using the command:
+  ```bash
+  pip install netifaces
+  ```
 
-## Functions
+### **Optional Tools**
+- The `lsof` command-line utility is recommended for identifying services on open ports.
 
-### `port_scan(port)`
-- **Parameters**: `port` - The port number to scan.
-- **Description**: Attempts to connect to the specified port on the target host. If successful, it indicates that the port is open; otherwise, it prints the port as closed.
-- **Locking Mechanism**: Uses `print_lock` to ensure thread-safe output to the console.
+---
 
-### `get_os(host)`
-- **Parameters**: `host` - The IP or hostname of the target.
-- **Description**: Attempts to retrieve OS information of the target via SSH. Runs the `uname -a` command on the remote machine. Note that the `UNAME@HOST` placeholder should be replaced with actual credentials for this function to work.
-- **Output**: Prints the OS information if the connection is successful.
+## **Usage**
+Run the script with appropriate command-line arguments to customize the scanning process. 
 
-### `scan_thread()`
-- **Description**: Continuously pulls port numbers from the queue and calls `port_scan()` to scan each port. Once a port scan is complete, it marks the task as done in the queue.
+### **Command-line Arguments**
+| Argument          | Description                                                                                          | Example                          |
+|-------------------|------------------------------------------------------------------------------------------------------|----------------------------------|
+| `-i`, `--interface` | Specify the network interface to scan. Only hosts on the network of this interface will be scanned. | `--interface eno1`              |
+| `-r`, `--ip-range`  | Provide a custom IP range in CIDR notation to scan. Overrides the interface option if provided.     | `--ip-range 192.168.1.0/24`     |
+| `-p`, `--port-range`| Define a range of ports to scan, formatted as `start-end`. If not specified, all ports are scanned. | `--port-range 20-80`            |
 
-### `main(host, ports)`
-- **Parameters**:
-  - `host` - The target IP or hostname.
-  - `ports` - List of port numbers to scan.
-- **Description**: Initializes and starts the threads for port scanning, enqueues each port in the range for scanning, and waits for all threads to complete their tasks.
-
-## Usage
-The script takes the following command-line arguments:
-- **host** (required) - The IP address or hostname to scan.
-- **--ports / -p** (optional) - Specifies the port range in the format start-end (default is 1-65535).
-
-### Example Command
+### **How to Run**
+#### 1. Scan a specific network interface:
 ```bash
-python fast_port_scaner.py 192.168.1.1 -p 1-1024
+python scanner.py --interface eno1
 ```
-This command scans the first 1024 ports on the host `192.168.1.1`.
 
-## Execution Flow
-1. The script parses command-line arguments to retrieve the target host and port range.
-2. It splits the port range into `start_port` and `end_port` and generates a list of ports to scan.
-3. The `main` function is called with the host and list of ports, which:
-   - Initializes threads and assigns each thread to `scan_thread()`.
-   - Enqueues ports for scanning and waits for all threads to finish.
-4. Each thread scans ports in parallel, improving scan speed on larger port ranges.
+#### 2. Scan a custom IP range:
+```bash
+python scanner.py --ip-range 192.168.1.0/24
+```
 
-## Notes and Warnings
-- **SSH Connection in get_os()**: This function is intended for retrieving OS information over SSH. It currently uses placeholder credentials (`UNAME@HOST`). Replace these placeholders with real credentials for the function to work.
-- **Thread Safety**: The script uses a lock (`print_lock`) to prevent simultaneous console output from multiple threads.
-- **Permissions**: Ensure you have permission to scan the target host, as unauthorized scanning may be illegal and against network policies.
+#### 3. Scan specific ports:
+```bash
+python scanner.py --port-range 20-80
+```
+
+#### 4. Combine options:
+```bash
+python scanner.py --interface eno1 --port-range 22-1024
+```
+
+---
+
+## **Output**
+### **Files Generated**
+1. **`open_ports.json`**:
+   Contains all scanned hosts and their open ports in JSON format.
+   ```json
+   {
+       "192.168.1.1": [22, 80, 443],
+       "192.168.1.2": [22, 8080]
+   }
+   ```
+
+2. **Console Output**:
+   Displays progress and details of open ports during the scan:
+   ```
+   Port 22 is open for host 192.168.1.1
+   Port 80 is open for host 192.168.1.1
+   ```
+
+---
+
+## **Internal Functions**
+### **1. `get_all_local_ips()`**
+   - Retrieves all local IP addresses associated with active network interfaces.
+   - **Returns**: A dictionary mapping interfaces to their IP addresses.
+
+### **2. `get_net_interface(interface)`**
+   - Finds the IP address of a specified network interface.
+   - **Input**: `interface` (e.g., `eno1`).
+   - **Returns**: The IP address of the interface or `None` if not found.
+
+### **3. `get_custom_hosts(ip_range)`**
+   - Generates a list of host IPs from a provided CIDR range.
+   - **Input**: `ip_range` (e.g., `192.168.1.0/24`).
+   - **Returns**: A list of host IPs.
+
+### **4. `port_scan(host, ports)`**
+   - Performs a scan on the given ports for a single host.
+   - **Inputs**:
+     - `host`: Target host IP address.
+     - `ports`: List or range of ports to scan.
+   - **Returns**: A list of open ports.
+
+### **5. `identify_service(port)`**
+   - Uses the `lsof` utility to identify the service running on a port.
+   - **Input**: `port` (e.g., `80`).
+   - **Returns**: Service name or `Unknown` if not detected.
+
+---
+
+## **Error Handling**
+- **Invalid Network Interface**: If the specified network interface is invalid or has no IP, an error message is shown.
+- **Invalid IP Range**: The script validates the provided IP range. If invalid, it exits with an error.
+- **Invalid Port Range**: An incorrectly formatted port range triggers a descriptive error message.
+
+---
+
+## **Example Workflow**
+### **Scenario**: Scan a network for open SSH (22) and HTTP (80) ports.
+1. Identify the active network interface using `ifconfig` or `ip a`.
+2. Run the script:
+   ```bash
+   python scanner.py --interface eno1 --port-range 22-80
+   ```
+3. View results in `open_ports.json`:
+   ```json
+   {
+       "192.168.1.1": [22, 80],
+       "192.168.1.2": [22]
+   }
+   ```
+
+---
+
+## **Limitations**
+1. **Asynchronous Scanning**:
+   - Uses non-blocking sockets for efficiency but may skip some ports if the host is heavily loaded.
+2. **Service Identification**:
+   - Relies on `lsof`, which may not always detect services due to permission restrictions.
+
+---
+
+## **Extending the Script**
+To extend the script, consider:
+1. Adding support for scanning multiple IP ranges.
+2. Including an option to exclude certain hosts or ports.
+3. Improving service detection by using `nmap` or similar tools.
+
+---
+
+## ⚠️ Warning
+
+This code is intended **only for ethical purposes** such as network diagnostics, security testing on networks you own, or networks where you have explicit permission from the owner. 
+
+**Unauthorized use of this code to scan networks without proper consent is illegal and unethical.** Misuse may result in severe legal consequences, including fines or imprisonment, depending on your jurisdiction.
+
+Always ensure compliance with local laws and regulations before running this script. The authors and contributors to this script are not responsible for any misuse or harm caused by its improper application.
