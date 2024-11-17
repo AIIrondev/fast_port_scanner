@@ -1,85 +1,137 @@
 import argparse
-import socket # for connecting
-from colorama import init, Fore
-from threading import Thread, Lock
-from queue import Queue
-import sys
+import netifaces
+import ipaddress
+import socket
+import selectors
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+import json
+import os
 import subprocess
 
-# some colors
-init()
-GREEN = Fore.GREEN
-RESET = Fore.RESET
-GRAY = Fore.LIGHTBLACK_EX
+class NetworkScanner:
+    def __init__(self, interface=None, ip_range=None, port_range=None):
+        self.maximal_ports = 65535
+        self.open_ports = {}
+        
+        # Netzwerkschnittstelle oder IP-Bereich abrufen
+        if ip_range:
+            hosts = self.get_custom_hosts(ip_range)
+        else:
+            hosts = self.get_hosts(interface)
+        
+        if not hosts:
+            print("No valid network interface or IP range found. Exiting.")
+            return
+        
+        port_range = port_range if port_range else range(self.maximal_ports)
+        max_processes = multiprocessing.cpu_count()
+        results = {}
 
-# number of threads
-N_THREADS = 200
-# thread queue
-q = Queue()
-print_lock = Lock()
-maximal_ports = 1025
+        with ProcessPoolExecutor(max_workers=max_processes) as executor:
+            futures = {executor.submit(self.run_scan, str(host), port_range): host for host in hosts}
+            for future in futures:
+                host = futures[future]
+                try:
+                    host, open_ports = future.result()
+                    results[host] = open_ports
+                except Exception as e:
+                    print(f"Error scanning host {host}: {e}")
 
-def port_scan(port):
-    try:
-        s = socket.socket()
-        s.connect((host, port))
-    except:
-        with print_lock:
-            print(f"{GRAY}{host:15}:{port:5} is closed  {RESET}", end='\r')
-    else:
-        with print_lock:
-            print(f"{GREEN}{host:15}:{port:5} is open    {RESET}")
-    finally:
-        s.close()
+        # Ergebnisse speichern
+        current_dir = os.getcwd()
+        output_file = os.path.join(current_dir, 'open_ports.json')
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=4)
+        
+        print("Scan finished. Results saved in 'open_ports.json'.")
 
-def get_os(host):
-    CMD="uname -a"
+    def get_all_local_ips(self):
+        interfaces = netifaces.interfaces()
+        ip_addresses = {}
+        for interface in interfaces:
+            addresses = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET in addresses:
+                ip_info = addresses[netifaces.AF_INET][0]
+                ip_addresses[interface] = ip_info['addr']
+        return ip_addresses
 
-    conn = subprocess.Popen(["ssh", "UNAME@HOST", CMD],
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE)
-    res = conn.stdout.readlines()
-    print(res)
+    def get_net_interface(self, interface):
+        interfaces = self.get_all_local_ips()
+        return interfaces.get(interface, None)
 
-def scan_thread():
-    global q
-    while True:
-        # get the port number from the queue
-        worker = q.get()
-        # scan that port number
-        port_scan(worker)
-        # tells the queue that the scanning for that port is done
-        q.task_done()
+    def port_scan(self, host, ports):
+        selector = selectors.DefaultSelector()
+        open_ports = []
+        for port in ports:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setblocking(False)
+            try:
+                sock.connect_ex((host, port))
+            except BlockingIOError:
+                pass
+            selector.register(sock, selectors.EVENT_WRITE, data=port)
+        while True:
+            events = selector.select(timeout=1)
+            if not events:
+                break
+            for key, _ in events:
+                sock = key.fileobj
+                port = key.data
+                try:
+                    sock.getpeername()
+                    open_ports.append(port)
+                    print(f"Port {port} is open for host {host}")
+                    service = self.identify_service(port)
+                    self.open_ports[host] = [port, service]
+                except (socket.error, OSError):
+                    pass
+                finally:
+                    selector.unregister(sock)
+                    sock.close()
+        return open_ports
 
+    def run_scan(self, host, ports):
+        open_ports = self.port_scan(host, ports)
+        return host, open_ports
 
-def main(host, ports):
-    global q
-    for t in range(N_THREADS):
-        # for each thread, start it
-        t = Thread(target=scan_thread)
-        # when we set daemon to true, that thread will end when the main thread ends
-        t.daemon = True
-        # start the daemon thread
-        t.start()
-    for worker in ports:
-        # for each port, put that port into the queue
-        # to start scanning
-        q.put(worker)
-    # wait the threads ( port scanners ) to finish
-    q.join()
-	
-if __name__ == "__main__":
-    # parse some parameters passed
-    parser = argparse.ArgumentParser(description="Simple port scanner")
-    parser.add_argument("host", help="Host to scan.")
-    parser.add_argument("--ports", "-p", dest="port_range", default="1-65535", help="Port range to scan, default is 1-65535 (all ports)")
+    def get_hosts(self, interface):
+        net_interface = self.get_net_interface(interface)
+        if not net_interface:
+            return []
+        network = ipaddress.ip_network(f"{net_interface}/24", strict=False)
+        hosts = list(network.hosts())
+        return hosts
+
+    def get_custom_hosts(self, ip_range):
+        network = ipaddress.ip_network(ip_range, strict=False)
+        return list(network.hosts())
+
+    def identify_service(self, port):
+        try:
+            result = subprocess.check_output(['lsof', '-i', f':{port}'], stderr=subprocess.DEVNULL)
+            service_name = result.decode().split('\n')[1].split()[0]
+            return service_name
+        except (IndexError, subprocess.CalledProcessError):
+            return "Unknown"
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Network Port Scanner")
+    parser.add_argument('-i', '--interface', help="Network interface to scan (e.g., 'eno1').")
+    parser.add_argument('-r', '--ip-range', help="Custom IP range to scan (e.g., '192.168.1.0/24').")
+    parser.add_argument('-p', '--port-range', help="Port range to scan (e.g., '20-80').", default=None)
+
     args = parser.parse_args()
-    host, port_range = args.host, args.port_range
 
-    start_port, end_port = port_range.split("-")
-    start_port, end_port = int(start_port), int(end_port)
+    # Portbereich parsen
+    if args.port_range:
+        try:
+            start, end = map(int, args.port_range.split('-'))
+            port_range = range(start, end + 1)
+        except ValueError:
+            print("Invalid port range format. Use 'start-end' (e.g., '20-80').")
+            exit(1)
+    else:
+        port_range = None
 
-    ports = [ p for p in range(start_port, end_port)]
-
-    main(host, ports)
+    NetworkScanner(interface=args.interface, ip_range=args.ip_range, port_range=port_range)
